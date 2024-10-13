@@ -1,0 +1,46 @@
+@echo off
+
+REM Enhanced Batch Script with Error Handling for ETL Process
+
+REM Function to handle errors
+:handle_error
+echo Error: %1
+pause
+exit /b 1
+
+REM Check if Python is installed
+python --version >nul 2>&1
+IF %ERRORLEVEL% NEQ 0 (
+    call :handle_error "Python is not installed. Please install Python and try again."
+)
+
+REM Install necessary Python packages
+echo Installing required Python packages...
+pip install pyarrow pandas SQLAlchemy pyodbc pyyaml
+IF %ERRORLEVEL% NEQ 0 (
+    call :handle_error "Failed to install required Python packages. Check your internet connection or package manager settings."
+)
+
+REM Define the path to your Python script and config file
+set SCRIPT_PATH=etl_script.py
+set CONFIG_PATH=config.yaml
+
+REM Check if the Python script exists
+IF NOT EXIST %SCRIPT_PATH% (
+    call :handle_error "Python script %SCRIPT_PATH% not found."
+)
+
+REM Check if the config file exists
+IF NOT EXIST %CONFIG_PATH% (
+    call :handle_error "Configuration file %CONFIG_PATH% not found."
+)
+
+REM Run the Python script
+echo Running the ETL script...
+python %SCRIPT_PATH%
+IF %ERRORLEVEL% NEQ 0 (
+    call :handle_error "The ETL script encountered an error during execution."
+)
+
+echo ETL script executed successfully.
+pause
