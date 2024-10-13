@@ -1,0 +1,10 @@
+{
+  "type": "record",
+  "name": "TableRecord",
+  "fields": [
+    {"name": "column1", "type": "string"},
+    {"name": "column2", "type": "int"},
+    {"name": "column3", "type": "boolean"}
+    // Add fields for all other columns...
+  ]
+}
