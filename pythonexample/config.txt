@@ -1,0 +1,283 @@
+pip install pyarrow pandas SQLAlchemy pyodbc pyyaml
+
+pip install PyYAML
+
+
+Key Enhancements
+Configuration Loading:
+
+Added error handling for the configuration loading process to catch file not found and YAML parsing errors.
+Data Fetching:
+
+Included exception handling in the fetch_data method to catch and report errors related to SQL execution and connection issues.
+Data Writing:
+
+Wrapped the logic for writing Parquet files in a try-except block to handle any file writing issues.
+ETL Processing:
+
+Added exception handling in the process_table method to catch and print errors that occur during the fetching and writing process, allowing the process to continue with other tables if one fails.
+In the process_tables method, errors from each thread are caught when calling future.result().
+Main Execution Block:
+
+Wrapped the entire execution process in a try-except block to catch any unhandled exceptions and print an error message.
+Benefits
+Robustness: The script can handle various runtime errors, allowing you to identify and respond to issues without crashing.
+Maintainability: Structured error handling makes it easier to debug issues and understand where they occur in the process.
+User Feedback: Clear error messages inform users about what went wrong, aiding in troubleshooting.
+This updated script maintains the SOLID principles and provides better stability and error reporting during the ETL process.
+
+
+
+
+
+
+You said:
+list of table would be in external config. Config will also need to have which sql file should be used for each indiviual tables.
+ChatGPT said:
+ChatGPT
+To manage the list of tables and their associated SQL files in an external configuration file, you can structure your YAML configuration as follows. This structure allows you to specify which SQL file should be used for each table, alongside any other necessary configurations.
+
+Example YAML Configuration File (config.yaml)
+Here’s a sample config.yaml that includes the list of tables and the corresponding SQL files:
+
+yaml
+Copy code
+database:
+  server: your_server
+  database: your_database
+  username: your_username
+  password: your_password
+  driver: ODBC Driver 17 for SQL Server
+
+etl:
+  page_size: 1000
+  thread_pool_size: 5
+
+tables:
+  - name: table1
+    sql_file: sql_queries/table1.sql
+  - name: table2
+    sql_file: sql_queries/table2.sql
+  - name: table3
+    sql_file: sql_queries/table3.sql
+Adjustments to Python Script
+With this configuration structure, you will need to modify your Python script to read the tables and their corresponding SQL files from the configuration file.
+
+Here’s how to update the script:
+
+python
+Copy code
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pandas as pd
+import yaml
+from sqlalchemy import create_engine, text
+from concurrent.futures import ThreadPoolExecutor
+from abc import ABC, abstractmethod
+import os
+
+# Load configuration from YAML
+def load_config(config_file='config.yaml'):
+    try:
+        with open(config_file, 'r') as file:
+            return yaml.safe_load(file)
+    except FileNotFoundError:
+        raise Exception(f"Configuration file '{config_file}' not found.")
+    except yaml.YAMLError as e:
+        raise Exception(f"Error parsing YAML configuration file: {e}")
+
+config = load_config()
+
+# Database Configuration
+DB_CONFIG = config['database']
+ETL_CONFIG = config['etl']
+
+# Extract tables information
+tables_info = config['tables']
+
+# Abstract base class for data fetching
+class DataFetcher(ABC):
+    @abstractmethod
+    def fetch_data(self, table_name: str, sql_file: str, offset: int, page_size: int, value: str):
+        pass
+
+# SQL Server Data Fetcher Implementation with parameterized queries
+class SQLServerDataFetcher(DataFetcher):
+    def __init__(self, db_config):
+        self.db_config = db_config
+        self.connection_str = (
+            f"mssql+pyodbc://{db_config['username']}:{db_config['password']}@"
+            f"{db_config['server']}/{db_config['database']}?"
+            f"driver={db_config['driver']}"
+        )
+        self.engine = create_engine(self.connection_str)
+        
+    def _load_sql(self, sql_file: str) -> str:
+        if not os.path.isfile(sql_file):
+            raise FileNotFoundError(f"SQL file not found: {sql_file}")
+        with open(sql_file, 'r') as file:
+            return file.read()
+    
+    def fetch_data(self, table_name: str, sql_file: str, offset: int, page_size: int, value: str) -> pd.DataFrame:
+        raw_query = self._load_sql(sql_file)
+        query = text(raw_query)
+        try:
+            with self.engine.connect() as conn:
+                return pd.read_sql(query, conn, params={"value": value, "offset": offset, "page_size": page_size})
+        except Exception as e:
+            raise Exception(f"Error fetching data from table '{table_name}': {e}")
+
+# Abstract base class for writing data to file
+class DataWriter(ABC):
+    @abstractmethod
+    def write_data(self, df: pd.DataFrame, file_path: str):
+        pass
+
+# Parquet File Writer Implementation using PyArrow
+class ParquetFileWriter(DataWriter):
+    def write_data(self, df: pd.DataFrame, file_path: str):
+        try:
+            table = pa.Table.from_pandas(df)
+            with pq.ParquetWriter(file_path, table.schema, compression='snappy') as writer:
+                writer.write_table(table)
+        except Exception as e:
+            raise Exception(f"Error writing data to Parquet file '{file_path}': {e}")
+
+# Main ETL Processor
+class ETLProcessor:
+    def __init__(self, data_fetcher: DataFetcher, data_writer: DataWriter, page_size: int):
+        self.data_fetcher = data_fetcher
+        self.data_writer = data_writer
+        self.page_size = page_size
+        
+    def process_table(self, table_name: str, sql_file: str, output_dir: str, value: str):
+        offset = 0
+        more_data = True
+        while more_data:
+            try:
+                df = self.data_fetcher.fetch_data(table_name, sql_file, offset, self.page_size, value)
+                if df.empty:
+                    more_data = False
+                else:
+                    file_path = f"{output_dir}/{table_name}.parquet"
+                    self.data_writer.write_data(df, file_path)
+                    offset += self.page_size
+            except Exception as e:
+                print(f"Error processing table '{table_name}': {e}")
+                break  # Exit the loop on error
+
+    def process_tables(self, tables_info: list, output_dir: str, value: str, thread_pool_size: int):
+        with ThreadPoolExecutor(max_workers=thread_pool_size) as executor:
+            futures = [
+                executor.submit(self.process_table, table['name'], table['sql_file'], output_dir, value)
+                for table in tables_info
+            ]
+            for future in futures:
+                try:
+                    future.result()  # Wait for the thread to complete and check for exceptions
+                except Exception as e:
+                    print(f"Error in processing table: {e}")
+
+# Execution Script
+if __name__ == "__main__":
+    try:
+        output_dir = "output_path"  # Set your output directory
+        value = "2024-07-28"  # Example date value for entrydate
+
+        # Instantiate data fetcher and writer
+        fetcher = SQLServerDataFetcher(DB_CONFIG)
+        writer = ParquetFileWriter()
+        
+        # Create ETL processor and execute
+        etl_processor = ETLProcessor(fetcher, writer, page_size=ETL_CONFIG['page_size'])
+        etl_processor.process_tables(tables_info, output_dir, value, thread_pool_size=ETL_CONFIG['thread_pool_size'])
+
+        print("ETL process completed successfully.")
+    except Exception as e:
+        print(f"An error occurred during the ETL process: {e}")
+Key Changes
+Updated YAML Configuration:
+
+The configuration file now includes a tables section, where each table has a name and sql_file specifying which SQL file to use.
+Data Fetcher Updates:
+
+The fetch_data method in SQLServerDataFetcher now takes an additional parameter, sql_file, to load the appropriate SQL file for each table dynamically.
+ETL Processor Updates:
+
+The process_tables method iterates over the list of tables, passing both the table name and corresponding SQL file to the process_table method.
+Benefits
+Configurability: Easily manage which SQL file is used for each table without modifying the code.
+Scalability: Easily add or remove tables and their SQL queries by simply updating the YAML configuration.
+Maintainability: Clear separation of configuration and code, adhering to the principles of clean code and maintainability.
+This setup provides a flexible and robust way to handle the ETL process while following best practices for configuration management.
+
+
+
+
+
+
+You said:
+how is tables_info passed in main?
+ChatGPT said:
+ChatGPT
+The tables_info variable is populated from the configuration loaded from the config.yaml file. In the provided Python script, tables_info is extracted from the config dictionary after loading the configuration. Let’s clarify that part in the script and show how tables_info is passed in the main execution block.
+
+Breakdown of the Relevant Sections
+Loading Configuration: The load_config function reads the config.yaml file and returns its contents as a dictionary. The tables_info variable is then extracted from this dictionary.
+
+Using tables_info in main: In the main execution block, tables_info is used when calling the process_tables method of the ETLProcessor instance.
+
+Here’s the updated and clarified section of the script with comments explaining the flow:
+
+python
+Copy code
+# Load configuration from YAML
+def load_config(config_file='config.yaml'):
+    try:
+        with open(config_file, 'r') as file:
+            return yaml.safe_load(file)  # Load the YAML content into a dictionary
+    except FileNotFoundError:
+        raise Exception(f"Configuration file '{config_file}' not found.")
+    except yaml.YAMLError as e:
+        raise Exception(f"Error parsing YAML configuration file: {e}")
+
+# Load the configuration
+config = load_config()
+
+# Extract database and ETL configurations
+DB_CONFIG = config['database']
+ETL_CONFIG = config['etl']
+
+# Extract tables information from configuration
+tables_info = config['tables']  # This holds the list of tables and their associated SQL files
+
+# Execution Script
+if __name__ == "__main__":
+    try:
+        output_dir = "output_path"  # Set your output directory
+        value = "2024-07-28"  # Example date value for entrydate
+
+        # Instantiate data fetcher and writer
+        fetcher = SQLServerDataFetcher(DB_CONFIG)
+        writer = ParquetFileWriter()
+        
+        # Create ETL processor and execute
+        etl_processor = ETLProcessor(fetcher, writer, page_size=ETL_CONFIG['page_size'])
+        
+        # Pass tables_info to the process_tables method
+        etl_processor.process_tables(tables_info, output_dir, value, thread_pool_size=ETL_CONFIG['thread_pool_size'])
+
+        print("ETL process completed successfully.")
+    except Exception as e:
+        print(f"An error occurred during the ETL process: {e}")
+Explanation
+Configuration Loading: The load_config function reads the YAML configuration file and parses it into a Python dictionary. The config variable stores this dictionary.
+
+Extracting Configuration Values:
+
+DB_CONFIG and ETL_CONFIG are derived from the config dictionary, pulling the database connection details and ETL settings respectively.
+tables_info is set to config['tables'], which contains the list of tables and their corresponding SQL file paths defined in the YAML.
+Passing tables_info: When the process_tables method of the ETLProcessor instance is called, tables_info is passed as an argument. This contains the list of tables, each with its name and associated SQL file, allowing the ETL processor to fetch data for each specified table using the corresponding SQL file.
+
+Summary
+The flow ensures that tables_info is correctly populated from the configuration file and passed into the ETL processing logic, enabling dynamic fetching of data from the specified tables and SQL queries. This setup keeps your code clean, configurable, and scalable.

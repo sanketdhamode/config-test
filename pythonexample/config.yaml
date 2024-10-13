@@ -1,0 +1,18 @@
+database:
+  server: your_server
+  database: your_database
+  username: your_username
+  password: your_password
+  driver: ODBC Driver 17 for SQL Server
+
+etl:
+  page_size: 1000
+  thread_pool_size: 5
+
+tables:
+  - name: table1
+    sql_file: sql_queries/table1.sql
+  - name: table2
+    sql_file: sql_queries/table2.sql
+  - name: table3
+    sql_file: sql_queries/table3.sql
