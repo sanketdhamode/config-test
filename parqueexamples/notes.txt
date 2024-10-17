@@ -1,0 +1,1658 @@
+Here's a step-by-step guide to building an application with Spring Boot 5 and Java 21 that reads data from multiple database tables in pages, writes it to a file with a pipe delimiter, and allows control over concurrency.
+
+This example includes:
+
+Configuration for managing SQL files and table-specific settings.
+Service and Repository layers for database access with pagination.
+Concurrency control to handle multiple tables.
+File Writing with custom delimiters.
+Parameterized SQL queries to handle filters like eventDate.
+Step 1: Set Up Your Project
+Create a Spring Boot project with the following dependencies:
+
+Spring Data JPA
+Spring Web
+HikariCP (for connection pooling)
+Any JDBC driver for your database (e.g., mysql-connector-java for MySQL)
+You can set up the project using Spring Initializr or manually in your IDE.
+
+Step 2: Application Configuration
+Create a configuration class to read SQL file paths, concurrency, and other settings from the application.yml file.
+
+yaml
+Copy code
+# application.yml
+
+app:
+  tables:
+    - name: "table1"
+      sqlFile: "sql/table1.sql"
+    - name: "table2"
+      sqlFile: "sql/table2.sql"
+  concurrencyLimit: 3
+  outputDirectory: "/path/to/output"
+  eventDates: ["2024-01-01", "2024-02-01"]
+Step 3: Create a Model for Table Configuration
+Create a class to represent each table's configuration.
+
+java
+Copy code
+@Data
+@ConfigurationProperties(prefix = "app")
+public class TableConfig {
+    private List<Table> tables;
+    private int concurrencyLimit;
+    private String outputDirectory;
+    private List<LocalDate> eventDates;
+
+    @Data
+    public static class Table {
+        private String name;
+        private String sqlFile;
+    }
+}
+Step 4: Create a Repository Layer for Data Access
+Implement a repository with a native query for dynamic SQL execution.
+
+java
+Copy code
+@Repository
+public interface DynamicRepository extends JpaRepository<Object[], Long> {
+    @Query(value = ":query", nativeQuery = true)
+    List<Object[]> executeDynamicQuery(@Param("query") String query, Pageable pageable);
+}
+Step 5: Create a Service Layer
+The service will read the SQL from the file, replace parameters, and fetch the data in pages.
+
+java
+Copy code
+@Service
+@RequiredArgsConstructor
+public class DataExportService {
+    private final DynamicRepository dynamicRepository;
+    private final TableConfig tableConfig;
+
+    public void exportTableData(String tableName, LocalDate eventDate) {
+        TableConfig.Table table = tableConfig.getTables()
+                                             .stream()
+                                             .filter(t -> t.getName().equalsIgnoreCase(tableName))
+                                             .findFirst()
+                                             .orElseThrow(() -> new IllegalArgumentException("Invalid table name"));
+
+        String sql = loadSqlFromFile(table.getSqlFile());
+        String query = sql.replace(":eventDate", eventDate.toString());
+
+        int page = 0;
+        Pageable pageable = PageRequest.of(page, 100);
+        List<Object[]> results;
+
+        do {
+            results = dynamicRepository.executeDynamicQuery(query, pageable);
+            writeResultsToFile(tableName, eventDate, results);
+            pageable = PageRequest.of(++page, 100);
+        } while (!results.isEmpty());
+    }
+
+    private String loadSqlFromFile(String filePath) {
+        try {
+            return Files.readString(Paths.get(filePath));
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read SQL file", e);
+        }
+    }
+
+    private void writeResultsToFile(String tableName, LocalDate eventDate, List<Object[]> results) {
+        Path outputPath = Paths.get(tableConfig.getOutputDirectory(), tableName + "-" + eventDate + ".txt");
+        try (BufferedWriter writer = Files.newBufferedWriter(outputPath, StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
+            for (Object[] row : results) {
+                writer.write(Arrays.stream(row).map(String::valueOf).collect(Collectors.joining("|")));
+                writer.newLine();
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not write to file", e);
+        }
+    }
+}
+Step 6: Set Up a Task Executor for Concurrency
+Use a TaskExecutor to control concurrency.
+
+java
+Copy code
+@Configuration
+public class TaskConfig {
+    @Bean
+    public Executor taskExecutor(TableConfig tableConfig) {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(tableConfig.getConcurrencyLimit());
+        executor.setMaxPoolSize(tableConfig.getConcurrencyLimit());
+        executor.setQueueCapacity(500);
+        executor.setThreadNamePrefix("DataExport-");
+        executor.initialize();
+        return executor;
+    }
+}
+Step 7: Create a Controller or Command-Line Runner to Trigger the Export
+A CommandLineRunner can start the process with multiple tables and dates.
+
+java
+Copy code
+@Component
+@RequiredArgsConstructor
+public class ExportRunner implements CommandLineRunner {
+    private final DataExportService dataExportService;
+    private final TableConfig tableConfig;
+    private final Executor taskExecutor;
+
+    @Override
+    public void run(String... args) {
+        for (TableConfig.Table table : tableConfig.getTables()) {
+            for (LocalDate eventDate : tableConfig.getEventDates()) {
+                taskExecutor.execute(() -> dataExportService.exportTableData(table.getName(), eventDate));
+            }
+        }
+    }
+}
+Step 8: Validate and Run
+Ensure your database schema and the SQL files align with the application. Then run your Spring Boot application.
+
+This setup should meet your requirements while ensuring scalability and concurrency control. Let me know if you need further customization or have questions on specific parts.
+
+
+
+
+
+
+You said:
+Using spring batch 5
+ChatGPT said:
+ChatGPT
+Using Spring Batch 5 with Java 21 provides a robust way to handle data processing jobs with features like chunk-based processing, step management, and transaction control. Below is a step-by-step guide to building a Spring Batch application that reads data from multiple database tables in pages, writes it to a file with a pipe delimiter, and allows concurrency control using Spring Batch’s parallel processing capabilities.
+
+Step 1: Set Up Your Project
+Create a Spring Boot project with the following dependencies:
+
+Spring Batch
+Spring Data JPA
+HikariCP (for connection pooling)
+A JDBC driver for your database (e.g., mysql-connector-java for MySQL)
+Step 2: Application Configuration
+Define the configuration in application.yml to manage SQL file paths, concurrency, and table-specific settings.
+
+yaml
+Copy code
+# application.yml
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/your_database
+    username: your_username
+    password: your_password
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+batch:
+  jdbc:
+    initialize-schema: always  # This will create necessary Batch tables.
+
+app:
+  tables:
+    - name: "table1"
+      sqlFile: "sql/table1.sql"
+    - name: "table2"
+      sqlFile: "sql/table2.sql"
+  outputDirectory: "/path/to/output"
+  eventDates: ["2024-01-01", "2024-02-01"]
+  chunkSize: 100
+  concurrencyLimit: 3
+Step 3: Create a Model for Table Configuration
+This will hold table-specific configuration details.
+
+java
+Copy code
+@Data
+@ConfigurationProperties(prefix = "app")
+public class TableConfig {
+    private List<Table> tables;
+    private String outputDirectory;
+    private List<LocalDate> eventDates;
+    private int chunkSize;
+    private int concurrencyLimit;
+
+    @Data
+    public static class Table {
+        private String name;
+        private String sqlFile;
+    }
+}
+Step 4: Implement a Custom ItemReader to Read Data from SQL Files
+Create a custom ItemReader that dynamically loads SQL queries from files and applies parameters like eventDate.
+
+java
+Copy code
+public class SqlFileItemReader implements ItemReader<Map<String, Object>> {
+    private final JdbcTemplate jdbcTemplate;
+    private final String sql;
+    private final LocalDate eventDate;
+    private int currentPage = 0;
+    private final int chunkSize;
+
+    public SqlFileItemReader(JdbcTemplate jdbcTemplate, String sql, LocalDate eventDate, int chunkSize) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.sql = sql;
+        this.eventDate = eventDate;
+        this.chunkSize = chunkSize;
+    }
+
+    @Override
+    public Map<String, Object> read() {
+        String paginatedQuery = sql + " LIMIT " + chunkSize + " OFFSET " + (currentPage++ * chunkSize);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(paginatedQuery, eventDate);
+        return rows.isEmpty() ? null : rows.get(0); // returns one row at a time
+    }
+}
+Step 5: Configure a FlatFileItemWriter to Write Data to a File
+Set up a file writer that outputs data with a pipe delimiter.
+
+java
+Copy code
+@Bean
+public FlatFileItemWriter<Map<String, Object>> writer(TableConfig tableConfig, TableConfig.Table table, LocalDate eventDate) {
+    return new FlatFileItemWriterBuilder<Map<String, Object>>()
+            .name("fileWriter")
+            .resource(new FileSystemResource(tableConfig.getOutputDirectory() + "/" + table.getName() + "-" + eventDate + ".txt"))
+            .lineAggregator(new DelimitedLineAggregator<Map<String, Object>>() {{
+                setDelimiter("|");
+                setFieldExtractor(item -> item.values().toArray(new String[0]));
+            }})
+            .build();
+}
+Step 6: Define a Step and Job Configuration
+Use Spring Batch’s JobBuilderFactory and StepBuilderFactory to define the steps and jobs. Configure chunk processing for each table and event date.
+
+java
+Copy code
+@Configuration
+@EnableBatchProcessing
+@RequiredArgsConstructor
+public class BatchConfig {
+    private final JobBuilderFactory jobBuilderFactory;
+    private final StepBuilderFactory stepBuilderFactory;
+    private final JdbcTemplate jdbcTemplate;
+    private final TableConfig tableConfig;
+
+    @Bean
+    public Job exportJob() {
+        JobBuilder jobBuilder = jobBuilderFactory.get("exportJob");
+        Step[] steps = tableConfig.getTables().stream()
+                                  .flatMap(table -> tableConfig.getEventDates().stream()
+                                                              .map(eventDate -> exportStep(table, eventDate)))
+                                  .toArray(Step[]::new);
+        return jobBuilder.start(steps[0]).next(steps[1]).build(); // Define more steps as needed
+    }
+
+    public Step exportStep(TableConfig.Table table, LocalDate eventDate) {
+        return stepBuilderFactory.get("exportStep-" + table.getName() + "-" + eventDate)
+                                 .<Map<String, Object>, Map<String, Object>>chunk(tableConfig.getChunkSize())
+                                 .reader(new SqlFileItemReader(jdbcTemplate, loadSqlFromFile(table.getSqlFile()), eventDate, tableConfig.getChunkSize()))
+                                 .writer(writer(tableConfig, table, eventDate))
+                                 .build();
+    }
+
+    private String loadSqlFromFile(String filePath) {
+        try {
+            return Files.readString(Paths.get(filePath));
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read SQL file", e);
+        }
+    }
+}
+Step 7: Configure a Task Executor for Concurrency
+Enable concurrent processing by configuring a task executor.
+
+java
+Copy code
+@Bean
+public TaskExecutor taskExecutor() {
+    ThreadPoolTaskExecutor taskExecutor = new ThreadPoolTaskExecutor();
+    taskExecutor.setCorePoolSize(tableConfig.getConcurrencyLimit());
+    taskExecutor.setMaxPoolSize(tableConfig.getConcurrencyLimit());
+    taskExecutor.setThreadNamePrefix("BatchExport-");
+    taskExecutor.initialize();
+    return taskExecutor;
+}
+Step 8: Run the Batch Job
+The JobLauncherCommandLineRunner will automatically execute the job on startup if the application is configured correctly. You can trigger the job manually using a REST controller or command-line runner, as needed.
+
+This configuration ensures that:
+
+Each table and event date runs in parallel, controlled by a configurable concurrency limit.
+Data is processed in chunks, using SQL pagination, and written to a file in a pipe-delimited format.
+This setup provides robust data handling with Spring Batch 5 while allowing you to scale concurrency and handle multiple tables efficiently.
+
+
+
+
+
+
+You said:
+Show me complete example. Event date would be fetched using sql.
+ChatGPT said:
+ChatGPT
+Here's a complete Spring Batch 5 application example that reads data from multiple database tables, processes it in pages, and writes it to a file with a pipe delimiter. In this example, the eventDate values are fetched from the database using an SQL query and then used to filter the data from each table.
+
+Project Structure
+Here’s how the code is structured:
+
+Configuration: Holds table-specific settings and batch configuration.
+Batch Job: Configures Spring Batch job with steps, each processing a table with a given eventDate.
+Reader and Writer: Reads data in pages and writes to a file.
+Service Layer: Fetches eventDate values dynamically from the database.
+Step 1: Define Application Configuration
+Define settings in application.yml to manage table configurations, file output location, and concurrency settings.
+
+yaml
+Copy code
+# application.yml
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/your_database
+    username: your_username
+    password: your_password
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+batch:
+  jdbc:
+    initialize-schema: always  # Creates necessary Batch tables on startup.
+
+app:
+  tables:
+    - name: "table1"
+      sqlFile: "sql/table1.sql"
+      eventDateQuery: "SELECT DISTINCT eventDate FROM table1_events"
+    - name: "table2"
+      sqlFile: "sql/table2.sql"
+      eventDateQuery: "SELECT DISTINCT eventDate FROM table2_events"
+  outputDirectory: "/path/to/output"
+  chunkSize: 100
+  concurrencyLimit: 3
+Step 2: Define Table Configuration Model
+This model holds configuration details for each table, including the SQL file and event date query.
+
+java
+Copy code
+@Data
+@ConfigurationProperties(prefix = "app")
+public class TableConfig {
+    private List<Table> tables;
+    private String outputDirectory;
+    private int chunkSize;
+    private int concurrencyLimit;
+
+    @Data
+    public static class Table {
+        private String name;
+        private String sqlFile;
+        private String eventDateQuery;
+    }
+}
+Step 3: Create Service to Fetch Event Dates
+Create a service that fetches eventDate values from the database based on table-specific queries.
+
+java
+Copy code
+@Service
+@RequiredArgsConstructor
+public class EventDateService {
+    private final JdbcTemplate jdbcTemplate;
+
+    public List<LocalDate> getEventDates(String query) {
+        return jdbcTemplate.query(query, (rs, rowNum) -> rs.getDate("eventDate").toLocalDate());
+    }
+}
+Step 4: Implement Custom ItemReader for SQL-Based Pagination
+Create an ItemReader that reads data using a parameterized SQL file and paginates through the results.
+
+java
+Copy code
+public class SqlFileItemReader implements ItemReader<Map<String, Object>> {
+    private final JdbcTemplate jdbcTemplate;
+    private final String sql;
+    private final LocalDate eventDate;
+    private int currentPage = 0;
+    private final int chunkSize;
+
+    public SqlFileItemReader(JdbcTemplate jdbcTemplate, String sql, LocalDate eventDate, int chunkSize) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.sql = sql;
+        this.eventDate = eventDate;
+        this.chunkSize = chunkSize;
+    }
+
+    @Override
+    public Map<String, Object> read() {
+        String paginatedQuery = sql + " LIMIT " + chunkSize + " OFFSET " + (currentPage++ * chunkSize);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(paginatedQuery, eventDate);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+}
+Step 5: Create a Writer to Write Data to File
+Set up a FlatFileItemWriter to write data to files using a pipe delimiter.
+
+java
+Copy code
+@Bean
+public FlatFileItemWriter<Map<String, Object>> writer(TableConfig tableConfig, TableConfig.Table table, LocalDate eventDate) {
+    return new FlatFileItemWriterBuilder<Map<String, Object>>()
+            .name("fileWriter")
+            .resource(new FileSystemResource(tableConfig.getOutputDirectory() + "/" + table.getName() + "-" + eventDate + ".txt"))
+            .lineAggregator(new DelimitedLineAggregator<Map<String, Object>>() {{
+                setDelimiter("|");
+                setFieldExtractor(item -> item.values().toArray(new String[0]));
+            }})
+            .build();
+}
+Step 6: Define a Batch Job and Step Configuration
+Set up a Spring Batch job that runs a step for each table-eventDate combination.
+
+java
+Copy code
+@Configuration
+@EnableBatchProcessing
+@RequiredArgsConstructor
+public class BatchConfig {
+    private final JobBuilderFactory jobBuilderFactory;
+    private final StepBuilderFactory stepBuilderFactory;
+    private final JdbcTemplate jdbcTemplate;
+    private final TableConfig tableConfig;
+    private final EventDateService eventDateService;
+
+    @Bean
+    public Job exportJob() {
+        JobBuilder jobBuilder = jobBuilderFactory.get("exportJob");
+        Step[] steps = tableConfig.getTables().stream()
+                                  .flatMap(table -> eventDateService.getEventDates(table.getEventDateQuery()).stream()
+                                                                     .map(eventDate -> exportStep(table, eventDate)))
+                                  .toArray(Step[]::new);
+        return jobBuilder.start(steps[0]).next(steps[1]).build(); // More steps as needed
+    }
+
+    public Step exportStep(TableConfig.Table table, LocalDate eventDate) {
+        return stepBuilderFactory.get("exportStep-" + table.getName() + "-" + eventDate)
+                                 .<Map<String, Object>, Map<String, Object>>chunk(tableConfig.getChunkSize())
+                                 .reader(new SqlFileItemReader(jdbcTemplate, loadSqlFromFile(table.getSqlFile()), eventDate, tableConfig.getChunkSize()))
+                                 .writer(writer(tableConfig, table, eventDate))
+                                 .build();
+    }
+
+    private String loadSqlFromFile(String filePath) {
+        try {
+            return Files.readString(Paths.get(filePath));
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read SQL file", e);
+        }
+    }
+}
+Step 7: Configure Task Executor for Concurrency
+Control concurrency using Spring Batch’s built-in task executor capabilities.
+
+java
+Copy code
+@Bean
+public TaskExecutor taskExecutor() {
+    ThreadPoolTaskExecutor taskExecutor = new ThreadPoolTaskExecutor();
+    taskExecutor.setCorePoolSize(tableConfig.getConcurrencyLimit());
+    taskExecutor.setMaxPoolSize(tableConfig.getConcurrencyLimit());
+    taskExecutor.setThreadNamePrefix("BatchExport-");
+    taskExecutor.initialize();
+    return taskExecutor;
+}
+Step 8: Trigger the Job
+The JobLauncherCommandLineRunner will automatically execute the job on startup if configured correctly. Alternatively, you can add a REST controller or command-line runner to trigger the job as needed.
+
+Summary
+This configuration:
+
+Loads eventDate values dynamically from the database.
+Processes each table-eventDate combination concurrently, controlled by a configurable limit.
+Writes data to file with a pipe delimiter.
+This setup will give you a scalable, concurrent, and flexible batch processing application using Spring Batch 5. Let me know if you need further customization or have questions on specific parts.
+
+
+
+
+
+
+You said:
+I want to process the database in parallel. Its a sql server database
+ChatGPT said:
+ChatGPT
+To process a SQL Server database in parallel using Spring Batch 5, you can utilize partitioned steps to distribute the workload across multiple threads. This approach will allow you to read data from the database in parallel, process it, and then write it to files concurrently.
+
+Steps for Implementing Parallel Processing with Spring Batch and SQL Server
+Step 1: Set Up Project Dependencies
+Make sure to include the following dependencies in your pom.xml (if using Maven):
+
+spring-boot-starter-batch
+spring-boot-starter-data-jpa
+com.microsoft.sqlserver:mssql-jdbc (SQL Server JDBC Driver)
+spring-boot-starter-jdbc
+Step 2: Configure application.yml
+Define configuration for the SQL Server database connection, the number of partitions (threads), and the output directory.
+
+yaml
+Copy code
+spring:
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=your_database
+    username: your_username
+    password: your_password
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+
+batch:
+  jdbc:
+    initialize-schema: always  # Initialize Spring Batch tables
+
+app:
+  tables:
+    - name: "table1"
+      sqlFile: "sql/table1.sql"
+      eventDateQuery: "SELECT DISTINCT eventDate FROM table1_events"
+    - name: "table2"
+      sqlFile: "sql/table2.sql"
+      eventDateQuery: "SELECT DISTINCT eventDate FROM table2_events"
+  outputDirectory: "/path/to/output"
+  chunkSize: 100
+  concurrencyLimit: 4  # Number of parallel threads
+  partitionCount: 4    # Number of partitions for parallel processing
+Step 3: Create Table and Event Date Configuration Model
+This model will hold settings for each table, the SQL file, and the event date query.
+
+java
+Copy code
+@Data
+@ConfigurationProperties(prefix = "app")
+public class TableConfig {
+    private List<Table> tables;
+    private String outputDirectory;
+    private int chunkSize;
+    private int concurrencyLimit;
+    private int partitionCount;
+
+    @Data
+    public static class Table {
+        private String name;
+        private String sqlFile;
+        private String eventDateQuery;
+    }
+}
+Step 4: Define a Partitioner for Parallel Processing
+The Partitioner will divide the workload into smaller parts based on the partition count.
+
+java
+Copy code
+public class EventDatePartitioner implements Partitioner {
+    private final JdbcTemplate jdbcTemplate;
+    private final String query;
+
+    public EventDatePartitioner(JdbcTemplate jdbcTemplate, String query) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.query = query;
+    }
+
+    @Override
+    public Map<String, ExecutionContext> partition(int gridSize) {
+        List<LocalDate> eventDates = jdbcTemplate.query(query, (rs, rowNum) -> rs.getDate("eventDate").toLocalDate());
+        Map<String, ExecutionContext> partitionMap = new HashMap<>(gridSize);
+
+        for (int i = 0; i < eventDates.size(); i++) {
+            ExecutionContext context = new ExecutionContext();
+            context.put("eventDate", eventDates.get(i));
+            partitionMap.put("partition" + i, context);
+        }
+        return partitionMap;
+    }
+}
+Step 5: Create an ItemReader for SQL Pagination
+This custom ItemReader reads data from the database with pagination and applies the eventDate filter.
+
+java
+Copy code
+public class SqlServerItemReader extends JdbcPagingItemReader<Map<String, Object>> {
+    public SqlServerItemReader(DataSource dataSource, String sql, LocalDate eventDate, int chunkSize) {
+        setDataSource(dataSource);
+        setPageSize(chunkSize);
+        setRowMapper(new ColumnMapRowMapper());
+        setQueryProvider(createQueryProvider(sql, eventDate));
+    }
+
+    private SqlPagingQueryProvider createQueryProvider(String sql, LocalDate eventDate) {
+        SqlPagingQueryProvider queryProvider = new SqlPagingQueryProvider();
+        queryProvider.setSelectClause("SELECT *");
+        queryProvider.setFromClause("FROM (" + sql + ") AS T");
+        queryProvider.setWhereClause("WHERE eventDate = :eventDate");
+        queryProvider.setSortKeys(Map.of("id", Order.ASCENDING));
+        queryProvider.setParameterValues(Map.of("eventDate", eventDate));
+        return queryProvider;
+    }
+}
+Step 6: Set Up a FlatFileItemWriter for Writing Data to Files
+This writer will output data to files, using a pipe delimiter.
+
+java
+Copy code
+@Bean
+public FlatFileItemWriter<Map<String, Object>> writer(TableConfig tableConfig, TableConfig.Table table, LocalDate eventDate) {
+    return new FlatFileItemWriterBuilder<Map<String, Object>>()
+            .name("fileWriter")
+            .resource(new FileSystemResource(tableConfig.getOutputDirectory() + "/" + table.getName() + "-" + eventDate + ".txt"))
+            .lineAggregator(new DelimitedLineAggregator<Map<String, Object>>() {{
+                setDelimiter("|");
+                setFieldExtractor(item -> item.values().toArray(new String[0]));
+            }})
+            .build();
+}
+Step 7: Configure the Spring Batch Job and Step
+Set up the batch job and steps to process the tables concurrently.
+
+java
+Copy code
+@Configuration
+@EnableBatchProcessing
+@RequiredArgsConstructor
+public class BatchConfig {
+    private final JobBuilderFactory jobBuilderFactory;
+    private final StepBuilderFactory stepBuilderFactory;
+    private final DataSource dataSource;
+    private final TableConfig tableConfig;
+    private final EventDateService eventDateService;
+
+    @Bean
+    public Job exportJob() {
+        JobBuilder jobBuilder = jobBuilderFactory.get("exportJob");
+        Step[] steps = tableConfig.getTables().stream()
+                                  .map(this::parallelStep)
+                                  .toArray(Step[]::new);
+        return jobBuilder.start(steps[0]).next(steps[1]).build(); // More steps as needed
+    }
+
+    public Step parallelStep(TableConfig.Table table) {
+        return stepBuilderFactory.get("parallelStep-" + table.getName())
+                                 .partitioner("partitionedStep", new EventDatePartitioner(jdbcTemplate, table.getEventDateQuery()))
+                                 .step(exportStep(table))
+                                 .gridSize(tableConfig.getPartitionCount())
+                                 .taskExecutor(taskExecutor())
+                                 .build();
+    }
+
+    public Step exportStep(TableConfig.Table table) {
+        return stepBuilderFactory.get("exportStep-" + table.getName())
+                                 .<Map<String, Object>, Map<String, Object>>chunk(tableConfig.getChunkSize())
+                                 .reader(new SqlServerItemReader(dataSource, loadSqlFromFile(table.getSqlFile()), eventDate, tableConfig.getChunkSize()))
+                                 .writer(writer(tableConfig, table, eventDate))
+                                 .build();
+    }
+
+    private String loadSqlFromFile(String filePath) {
+        try {
+            return Files.readString(Paths.get(filePath));
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read SQL file", e);
+        }
+    }
+}
+Step 8: Set Up Task Executor for Concurrency
+Control concurrency using a TaskExecutor with a thread pool.
+
+java
+Copy code
+@Bean
+public TaskExecutor taskExecutor() {
+    ThreadPoolTaskExecutor taskExecutor = new ThreadPoolTaskExecutor();
+    taskExecutor.setCorePoolSize(tableConfig.getConcurrencyLimit());
+    taskExecutor.setMaxPoolSize(tableConfig.getConcurrencyLimit());
+    taskExecutor.setThreadNamePrefix("BatchExport-");
+    taskExecutor.initialize();
+    return taskExecutor;
+}
+Step 9: Run and Monitor the Job
+The JobLauncherCommandLineRunner will automatically start the job on application startup. You can also manually start the job through a REST controller or other means if desired.
+
+Summary
+This configuration enables parallel processing of database tables by partitioning the data on eventDate and running partitions concurrently. Spring Batch ensures each partition (with its respective eventDate) is processed in parallel, while the custom ItemReader paginates through results for each partitioned step.
+
+This setup gives you a scalable and efficient way to handle large data sets in SQL Server with Spring Batch 5, using partitioned steps and a custom ItemReader to achieve parallel processing. Let me know if you have questions or need adjustments for specific requirements.
+
+
+
+
+
+
+You said:
+i mean mutiple tables should be processing in parallel
+ChatGPT said:
+ChatGPT
+To process multiple tables in parallel in Spring Batch 5, you can set up multiple concurrent steps, each responsible for processing a different table. Each step will run in parallel, and each step can further leverage chunk processing and multi-threading if needed. This approach allows different tables to be processed independently and concurrently.
+
+Here’s how to implement this in your Spring Batch configuration:
+
+Steps for Implementing Parallel Table Processing
+Step 1: Define Configuration in application.yml
+Specify each table’s configuration, including SQL file and any queries needed for event dates. Configure concurrency and output settings.
+
+yaml
+Copy code
+spring:
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=your_database
+    username: your_username
+    password: your_password
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+
+app:
+  tables:
+    - name: "table1"
+      sqlFile: "sql/table1.sql"
+      eventDateQuery: "SELECT DISTINCT eventDate FROM table1_events"
+    - name: "table2"
+      sqlFile: "sql/table2.sql"
+      eventDateQuery: "SELECT DISTINCT eventDate FROM table2_events"
+  outputDirectory: "/path/to/output"
+  chunkSize: 100
+  concurrencyLimit: 4  # Number of threads for parallel processing
+Step 2: Create Table Configuration Model
+This model holds settings for each table, including the SQL file and the event date query.
+
+java
+Copy code
+@Data
+@ConfigurationProperties(prefix = "app")
+public class TableConfig {
+    private List<Table> tables;
+    private String outputDirectory;
+    private int chunkSize;
+    private int concurrencyLimit;
+
+    @Data
+    public static class Table {
+        private String name;
+        private String sqlFile;
+        private String eventDateQuery;
+    }
+}
+Step 3: Implement the Event Date Fetching Service
+This service fetches eventDate values dynamically from the database for each table.
+
+java
+Copy code
+@Service
+@RequiredArgsConstructor
+public class EventDateService {
+    private final JdbcTemplate jdbcTemplate;
+
+    public List<LocalDate> getEventDates(String query) {
+        return jdbcTemplate.query(query, (rs, rowNum) -> rs.getDate("eventDate").toLocalDate());
+    }
+}
+Step 4: Create a Custom ItemReader for SQL-Based Pagination
+This ItemReader will read data based on a parameterized SQL file and paginate results.
+
+java
+Copy code
+public class SqlFileItemReader extends JdbcPagingItemReader<Map<String, Object>> {
+    public SqlFileItemReader(DataSource dataSource, String sql, LocalDate eventDate, int chunkSize) {
+        setDataSource(dataSource);
+        setPageSize(chunkSize);
+        setRowMapper(new ColumnMapRowMapper());
+        setQueryProvider(createQueryProvider(sql, eventDate));
+    }
+
+    private SqlPagingQueryProvider createQueryProvider(String sql, LocalDate eventDate) {
+        SqlPagingQueryProvider queryProvider = new SqlPagingQueryProvider();
+        queryProvider.setSelectClause("SELECT *");
+        queryProvider.setFromClause("FROM (" + sql + ") AS T");
+        queryProvider.setWhereClause("WHERE eventDate = :eventDate");
+        queryProvider.setSortKeys(Map.of("id", Order.ASCENDING));
+        queryProvider.setParameterValues(Map.of("eventDate", eventDate));
+        return queryProvider;
+    }
+}
+Step 5: Define a FlatFileItemWriter for Writing Data to Files
+Configure a writer to output data in pipe-delimited format.
+
+java
+Copy code
+@Bean
+public FlatFileItemWriter<Map<String, Object>> writer(TableConfig tableConfig, TableConfig.Table table, LocalDate eventDate) {
+    return new FlatFileItemWriterBuilder<Map<String, Object>>()
+            .name("fileWriter")
+            .resource(new FileSystemResource(tableConfig.getOutputDirectory() + "/" + table.getName() + "-" + eventDate + ".txt"))
+            .lineAggregator(new DelimitedLineAggregator<Map<String, Object>>() {{
+                setDelimiter("|");
+                setFieldExtractor(item -> item.values().toArray(new String[0]));
+            }})
+            .build();
+}
+Step 6: Configure Spring Batch Job with Parallel Steps
+Define a job that runs multiple steps concurrently. Each step processes a different table.
+
+java
+Copy code
+@Configuration
+@EnableBatchProcessing
+@RequiredArgsConstructor
+public class BatchConfig {
+    private final JobBuilderFactory jobBuilderFactory;
+    private final StepBuilderFactory stepBuilderFactory;
+    private final DataSource dataSource;
+    private final TableConfig tableConfig;
+    private final EventDateService eventDateService;
+
+    @Bean
+    public Job exportJob() {
+        JobBuilder jobBuilder = jobBuilderFactory.get("exportJob");
+        
+        Step[] steps = tableConfig.getTables().stream()
+                                  .map(this::createParallelStep)
+                                  .toArray(Step[]::new);
+                                  
+        return jobBuilder.start(steps[0]).split(taskExecutor()).add(steps).build(); // Start all steps in parallel
+    }
+
+    private Step createParallelStep(TableConfig.Table table) {
+        List<LocalDate> eventDates = eventDateService.getEventDates(table.getEventDateQuery());
+        
+        // Create step for each eventDate
+        return stepBuilderFactory.get("step-" + table.getName())
+                                 .<Map<String, Object>, Map<String, Object>>chunk(tableConfig.getChunkSize())
+                                 .reader(new SqlFileItemReader(dataSource, loadSqlFromFile(table.getSqlFile()), eventDates, tableConfig.getChunkSize()))
+                                 .writer(writer(tableConfig, table, eventDate))
+                                 .taskExecutor(taskExecutor())
+                                 .build();
+    }
+
+    private String loadSqlFromFile(String filePath) {
+        try {
+            return Files.readString(Paths.get(filePath));
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read SQL file", e);
+        }
+    }
+}
+Step 7: Configure TaskExecutor for Parallel Processing
+Set up a TaskExecutor to control the number of threads for parallel execution.
+
+java
+Copy code
+@Bean
+public TaskExecutor taskExecutor() {
+    ThreadPoolTaskExecutor taskExecutor = new ThreadPoolTaskExecutor();
+    taskExecutor.setCorePoolSize(tableConfig.getConcurrencyLimit());
+    taskExecutor.setMaxPoolSize(tableConfig.getConcurrencyLimit());
+    taskExecutor.setThreadNamePrefix("BatchExport-");
+    taskExecutor.initialize();
+    return taskExecutor;
+}
+Step 8: Run and Monitor the Job
+The JobLauncherCommandLineRunner will automatically execute the job on application startup if configured properly. Alternatively, add a REST controller or a manual trigger if needed.
+
+Summary
+With this configuration, each table is processed in parallel using separate steps, each backed by its own ItemReader, ItemWriter, and TaskExecutor. This setup ensures that tables are handled concurrently, with each table processed independently according to the concurrency limit.
+
+This approach gives you a high degree of parallelism and can be adjusted by changing the concurrencyLimit parameter. Let me know if you need further adjustments or additional details.
+
+
+
+
+
+
+You said:
+wrong example. doesn't work
+ChatGPT said:
+ChatGPT
+Let's walk through a corrected implementation to ensure that each table is processed in parallel correctly. Here’s how to configure a Spring Batch job where multiple tables are processed in parallel, each in its own step:
+
+Overview of the Implementation
+Multiple Steps: Each table is processed by a separate step, which allows Spring Batch to run them concurrently.
+Parallel Step Execution: Using a Split flow and a TaskExecutor, we’ll enable parallel execution of these steps.
+Custom Item Readers: Configure JdbcPagingItemReader to read from each table.
+File Writing: Write each table’s data to a file concurrently with FlatFileItemWriter.
+Step-by-Step Implementation
+Step 1: Project Dependencies
+Add necessary dependencies in your pom.xml:
+
+spring-boot-starter-batch
+spring-boot-starter-data-jpa
+com.microsoft.sqlserver:mssql-jdbc (SQL Server JDBC Driver)
+Step 2: Configuration in application.yml
+Specify settings for database connection, concurrency, and table information.
+
+yaml
+Copy code
+spring:
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=your_database
+    username: your_username
+    password: your_password
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+
+app:
+  tables:
+    - name: "table1"
+      sqlFile: "sql/table1.sql"
+    - name: "table2"
+      sqlFile: "sql/table2.sql"
+  outputDirectory: "/path/to/output"
+  chunkSize: 100
+  concurrencyLimit: 4  # Control parallelism level
+Step 3: Define Table Config Model
+This model will hold table-specific configurations.
+
+java
+Copy code
+@Data
+@ConfigurationProperties(prefix = "app")
+public class TableConfig {
+    private List<Table> tables;
+    private String outputDirectory;
+    private int chunkSize;
+    private int concurrencyLimit;
+
+    @Data
+    public static class Table {
+        private String name;
+        private String sqlFile;
+    }
+}
+Step 4: Implement Parallel Processing Steps
+Set up the batch job with parallel steps for each table.
+
+java
+Copy code
+@Configuration
+@EnableBatchProcessing
+@RequiredArgsConstructor
+public class BatchConfig {
+    private final JobBuilderFactory jobBuilderFactory;
+    private final StepBuilderFactory stepBuilderFactory;
+    private final DataSource dataSource;
+    private final TableConfig tableConfig;
+
+    @Bean
+    public Job parallelTablesJob() {
+        List<Flow> tableFlows = tableConfig.getTables().stream()
+                                           .map(this::createStepFlow)
+                                           .collect(Collectors.toList());
+
+        return jobBuilderFactory.get("parallelTablesJob")
+                                .start(new FlowBuilder<Flow>("splitFlow")
+                                    .split(taskExecutor())
+                                    .add(tableFlows.toArray(new Flow[0]))
+                                    .build())
+                                .build()
+                                .build();
+    }
+
+    private Flow createStepFlow(TableConfig.Table table) {
+        Step step = createStepForTable(table);
+        return new FlowBuilder<Flow>("flow-" + table.getName()).start(step).build();
+    }
+
+    private Step createStepForTable(TableConfig.Table table) {
+        return stepBuilderFactory.get("step-" + table.getName())
+                                 .<Map<String, Object>, Map<String, Object>>chunk(tableConfig.getChunkSize())
+                                 .reader(itemReader(table))
+                                 .writer(itemWriter(table))
+                                 .build();
+    }
+
+    private JdbcPagingItemReader<Map<String, Object>> itemReader(TableConfig.Table table) {
+        JdbcPagingItemReader<Map<String, Object>> reader = new JdbcPagingItemReader<>();
+        reader.setDataSource(dataSource);
+        reader.setFetchSize(tableConfig.getChunkSize());
+        reader.setRowMapper(new ColumnMapRowMapper());
+
+        SqlPagingQueryProviderFactoryBean queryProvider = new SqlPagingQueryProviderFactoryBean();
+        queryProvider.setDataSource(dataSource);
+        queryProvider.setSelectClause("SELECT *");
+        queryProvider.setFromClause("(" + loadSqlFromFile(table.getSqlFile()) + ") AS T");
+        queryProvider.setSortKey("id");  // Replace with primary key column
+
+        try {
+            reader.setQueryProvider(queryProvider.getObject());
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to set QueryProvider", e);
+        }
+        return reader;
+    }
+
+    private FlatFileItemWriter<Map<String, Object>> itemWriter(TableConfig.Table table) {
+        return new FlatFileItemWriterBuilder<Map<String, Object>>()
+                .name("fileWriter-" + table.getName())
+                .resource(new FileSystemResource(tableConfig.getOutputDirectory() + "/" + table.getName() + ".txt"))
+                .lineAggregator(new DelimitedLineAggregator<Map<String, Object>>() {{
+                    setDelimiter("|");
+                    setFieldExtractor(item -> item.values().toArray(new String[0]));
+                }})
+                .build();
+    }
+
+    private String loadSqlFromFile(String sqlFile) {
+        try {
+            return Files.readString(Paths.get(sqlFile));
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read SQL file: " + sqlFile, e);
+        }
+    }
+
+    @Bean
+    public TaskExecutor taskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(tableConfig.getConcurrencyLimit());
+        executor.setMaxPoolSize(tableConfig.getConcurrencyLimit());
+        executor.setThreadNamePrefix("Batch-");
+        executor.initialize();
+        return executor;
+    }
+}
+Step 5: Job Launch and Execution
+With this setup, Spring Batch will execute each table step concurrently. The job’s steps for each table will run in parallel, with TaskExecutor controlling concurrency. The JdbcPagingItemReader will handle database pagination, and each step writes the data to a separate file.
+
+This configuration enables parallel processing of multiple tables in Spring Batch using concurrent steps. Adjust concurrency settings and chunk sizes as needed for optimal performance. Let me know if there’s anything more specific you need!
+
+
+
+
+
+You said:
+forgot the event date populated
+ChatGPT said:
+ChatGPT
+To incorporate an eventDate parameter fetched dynamically from the database for each table, you can modify the setup so that each step retrieves the list of eventDates and processes them in parallel. This setup will use a partitioned step to process each eventDate separately within each table’s step.
+
+Here’s how to implement this in Spring Batch:
+
+Full Implementation
+Step 1: Define Configuration in application.yml
+Include eventDateQuery for each table to fetch event dates dynamically.
+
+yaml
+Copy code
+spring:
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=your_database
+    username: your_username
+    password: your_password
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+
+app:
+  tables:
+    - name: "table1"
+      sqlFile: "sql/table1.sql"
+      eventDateQuery: "SELECT DISTINCT eventDate FROM table1_events"
+    - name: "table2"
+      sqlFile: "sql/table2.sql"
+      eventDateQuery: "SELECT DISTINCT eventDate FROM table2_events"
+  outputDirectory: "/path/to/output"
+  chunkSize: 100
+  concurrencyLimit: 4  # Number of threads for parallel processing
+Step 2: Update Table Configuration Model
+Add the eventDateQuery to the Table model.
+
+java
+Copy code
+@Data
+@ConfigurationProperties(prefix = "app")
+public class TableConfig {
+    private List<Table> tables;
+    private String outputDirectory;
+    private int chunkSize;
+    private int concurrencyLimit;
+
+    @Data
+    public static class Table {
+        private String name;
+        private String sqlFile;
+        private String eventDateQuery;
+    }
+}
+Step 3: Implement a Service to Fetch Event Dates
+This service fetches eventDate values for each table using the provided SQL query.
+
+java
+Copy code
+@Service
+@RequiredArgsConstructor
+public class EventDateService {
+    private final JdbcTemplate jdbcTemplate;
+
+    public List<LocalDate> fetchEventDates(String eventDateQuery) {
+        return jdbcTemplate.query(eventDateQuery, (rs, rowNum) -> rs.getDate("eventDate").toLocalDate());
+    }
+}
+Step 4: Define the Partitioner for Event Dates
+This partitioner will split the step for each eventDate dynamically.
+
+java
+Copy code
+public class EventDatePartitioner implements Partitioner {
+    private final List<LocalDate> eventDates;
+
+    public EventDatePartitioner(List<LocalDate> eventDates) {
+        this.eventDates = eventDates;
+    }
+
+    @Override
+    public Map<String, ExecutionContext> partition(int gridSize) {
+        Map<String, ExecutionContext> partitionMap = new HashMap<>(gridSize);
+        for (int i = 0; i < eventDates.size(); i++) {
+            ExecutionContext context = new ExecutionContext();
+            context.put("eventDate", eventDates.get(i));
+            partitionMap.put("partition" + i, context);
+        }
+        return partitionMap;
+    }
+}
+Step 5: Configure Parallel Table Processing with Event Date Partitioning
+The batch job will run steps in parallel, with each step partitioned by eventDate.
+
+java
+Copy code
+@Configuration
+@EnableBatchProcessing
+@RequiredArgsConstructor
+public class BatchConfig {
+    private final JobBuilderFactory jobBuilderFactory;
+    private final StepBuilderFactory stepBuilderFactory;
+    private final DataSource dataSource;
+    private final TableConfig tableConfig;
+    private final EventDateService eventDateService;
+
+    @Bean
+    public Job parallelTablesJob() {
+        List<Flow> tableFlows = tableConfig.getTables().stream()
+                                           .map(this::createTableFlow)
+                                           .collect(Collectors.toList());
+
+        return jobBuilderFactory.get("parallelTablesJob")
+                                .start(new FlowBuilder<Flow>("splitFlow")
+                                    .split(taskExecutor())
+                                    .add(tableFlows.toArray(new Flow[0]))
+                                    .build())
+                                .build();
+    }
+
+    private Flow createTableFlow(TableConfig.Table table) {
+        List<LocalDate> eventDates = eventDateService.fetchEventDates(table.getEventDateQuery());
+        Step step = createPartitionedStepForTable(table, eventDates);
+
+        return new FlowBuilder<Flow>("flow-" + table.getName()).start(step).build();
+    }
+
+    private Step createPartitionedStepForTable(TableConfig.Table table, List<LocalDate> eventDates) {
+        return stepBuilderFactory.get("partitionedStep-" + table.getName())
+                                 .partitioner("step-" + table.getName(), new EventDatePartitioner(eventDates))
+                                 .step(createStepForTable(table))
+                                 .gridSize(tableConfig.getConcurrencyLimit())
+                                 .taskExecutor(taskExecutor())
+                                 .build();
+    }
+
+    private Step createStepForTable(TableConfig.Table table) {
+        return stepBuilderFactory.get("step-" + table.getName())
+                                 .<Map<String, Object>, Map<String, Object>>chunk(tableConfig.getChunkSize())
+                                 .reader(itemReader(table))
+                                 .writer(itemWriter(table))
+                                 .build();
+    }
+
+    private JdbcPagingItemReader<Map<String, Object>> itemReader(TableConfig.Table table) {
+        return new JdbcPagingItemReaderBuilder<Map<String, Object>>()
+                .dataSource(dataSource)
+                .name("jdbcPagingReader-" + table.getName())
+                .queryProvider(createQueryProvider(table))
+                .pageSize(tableConfig.getChunkSize())
+                .rowMapper(new ColumnMapRowMapper())
+                .build();
+    }
+
+    private SqlPagingQueryProvider createQueryProvider(TableConfig.Table table) {
+        SqlPagingQueryProviderFactoryBean provider = new SqlPagingQueryProviderFactoryBean();
+        provider.setDataSource(dataSource);
+        provider.setSelectClause("SELECT *");
+        provider.setFromClause("(" + loadSqlFromFile(table.getSqlFile()) + ") AS T");
+        provider.setWhereClause("WHERE eventDate = :eventDate"); // Filter on eventDate
+        provider.setSortKey("id"); // Replace 'id' with primary key
+
+        try {
+            return provider.getObject();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to set QueryProvider", e);
+        }
+    }
+
+    private FlatFileItemWriter<Map<String, Object>> itemWriter(TableConfig.Table table) {
+        return new FlatFileItemWriterBuilder<Map<String, Object>>()
+                .name("fileWriter-" + table.getName())
+                .resource(new FileSystemResource(tableConfig.getOutputDirectory() + "/" + table.getName() + ".txt"))
+                .lineAggregator(new DelimitedLineAggregator<Map<String, Object>>() {{
+                    setDelimiter("|");
+                    setFieldExtractor(item -> item.values().toArray(new String[0]));
+                }})
+                .build();
+    }
+
+    private String loadSqlFromFile(String sqlFile) {
+        try {
+            return Files.readString(Paths.get(sqlFile));
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read SQL file: " + sqlFile, e);
+        }
+    }
+
+    @Bean
+    public TaskExecutor taskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(tableConfig.getConcurrencyLimit());
+        executor.setMaxPoolSize(tableConfig.getConcurrencyLimit());
+        executor.setThreadNamePrefix("Batch-");
+        executor.initialize();
+        return executor;
+    }
+}
+Explanation:
+EventDatePartitioner: This partitioner splits the workload for each step based on eventDate, ensuring parallel processing for each date.
+Parallel Execution: Steps for different tables are executed in parallel using the split flow.
+Parameterized Queries: itemReader uses the WHERE clause with eventDate to filter records dynamically.
+This setup allows each table to be processed concurrently and partitions the data based on eventDate within each step. This way, you achieve parallel processing at both the table level and the eventDate level. Let me know if you need further customization!
+
+
+
+
+
+
+You said:
+some table won't have event date. Also the some table could have file upload date
+ChatGPT said:
+ChatGPT
+Memory updated
+For a scenario where different tables have different date fields (like eventDate, fileUploadDate, or no date field at all), you can modify the implementation to conditionally handle each table based on its specific requirements. Here’s how to adjust the configuration and code to accommodate these differences:
+
+Step-by-Step Implementation
+Step 1: Configure Table-Specific Date Fields in application.yml
+Specify the optional date field for each table. Use a default empty value if the table has no date-based filtering.
+
+yaml
+Copy code
+spring:
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=your_database
+    username: your_username
+    password: your_password
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+
+app:
+  tables:
+    - name: "table1"
+      sqlFile: "sql/table1.sql"
+      dateColumn: "eventDate"        # Date column to use, or empty if no filtering needed
+      dateQuery: "SELECT DISTINCT eventDate FROM table1_events"
+    - name: "table2"
+      sqlFile: "sql/table2.sql"
+      dateColumn: "fileUploadDate"   # Different date column
+      dateQuery: "SELECT DISTINCT fileUploadDate FROM table2_uploads"
+    - name: "table3"
+      sqlFile: "sql/table3.sql"
+      dateColumn: ""                 # No date filtering for this table
+  outputDirectory: "/path/to/output"
+  chunkSize: 100
+  concurrencyLimit: 4
+Step 2: Update the Table Configuration Model
+Include dateColumn and dateQuery as optional fields.
+
+java
+Copy code
+@Data
+@ConfigurationProperties(prefix = "app")
+public class TableConfig {
+    private List<Table> tables;
+    private String outputDirectory;
+    private int chunkSize;
+    private int concurrencyLimit;
+
+    @Data
+    public static class Table {
+        private String name;
+        private String sqlFile;
+        private String dateColumn;
+        private String dateQuery;  // Optional, for tables with date-based filtering
+    }
+}
+Step 3: Modify the Partitioner to Handle Optional Date-Based Filtering
+This partitioner will skip partitioning if there is no dateColumn.
+
+java
+Copy code
+public class DatePartitioner implements Partitioner {
+    private final List<LocalDate> dates;
+    private final String dateColumn;
+
+    public DatePartitioner(List<LocalDate> dates, String dateColumn) {
+        this.dates = dates;
+        this.dateColumn = dateColumn;
+    }
+
+    @Override
+    public Map<String, ExecutionContext> partition(int gridSize) {
+        Map<String, ExecutionContext> partitionMap = new HashMap<>(gridSize);
+        if (dateColumn == null || dateColumn.isEmpty()) {
+            ExecutionContext context = new ExecutionContext();
+            partitionMap.put("defaultPartition", context);
+        } else {
+            for (int i = 0; i < dates.size(); i++) {
+                ExecutionContext context = new ExecutionContext();
+                context.put("date", dates.get(i));
+                partitionMap.put("partition" + i, context);
+            }
+        }
+        return partitionMap;
+    }
+}
+Step 4: Adjust the Job Configuration to Handle Date Filtering Conditionally
+Modify the BatchConfig to handle tables with different date requirements.
+
+java
+Copy code
+@Configuration
+@EnableBatchProcessing
+@RequiredArgsConstructor
+public class BatchConfig {
+    private final JobBuilderFactory jobBuilderFactory;
+    private final StepBuilderFactory stepBuilderFactory;
+    private final DataSource dataSource;
+    private final TableConfig tableConfig;
+    private final EventDateService eventDateService;
+
+    @Bean
+    public Job parallelTablesJob() {
+        List<Flow> tableFlows = tableConfig.getTables().stream()
+                                           .map(this::createTableFlow)
+                                           .collect(Collectors.toList());
+
+        return jobBuilderFactory.get("parallelTablesJob")
+                                .start(new FlowBuilder<Flow>("splitFlow")
+                                    .split(taskExecutor())
+                                    .add(tableFlows.toArray(new Flow[0]))
+                                    .build())
+                                .build();
+    }
+
+    private Flow createTableFlow(TableConfig.Table table) {
+        List<LocalDate> dates = table.getDateColumn().isEmpty() 
+                                ? Collections.emptyList() 
+                                : eventDateService.fetchEventDates(table.getDateQuery());
+                                
+        Step step = createPartitionedStepForTable(table, dates);
+
+        return new FlowBuilder<Flow>("flow-" + table.getName()).start(step).build();
+    }
+
+    private Step createPartitionedStepForTable(TableConfig.Table table, List<LocalDate> dates) {
+        return stepBuilderFactory.get("partitionedStep-" + table.getName())
+                                 .partitioner("step-" + table.getName(), new DatePartitioner(dates, table.getDateColumn()))
+                                 .step(createStepForTable(table))
+                                 .gridSize(tableConfig.getConcurrencyLimit())
+                                 .taskExecutor(taskExecutor())
+                                 .build();
+    }
+
+    private Step createStepForTable(TableConfig.Table table) {
+        return stepBuilderFactory.get("step-" + table.getName())
+                                 .<Map<String, Object>, Map<String, Object>>chunk(tableConfig.getChunkSize())
+                                 .reader(itemReader(table))
+                                 .writer(itemWriter(table))
+                                 .build();
+    }
+
+    private JdbcPagingItemReader<Map<String, Object>> itemReader(TableConfig.Table table) {
+        String query = loadSqlFromFile(table.getSqlFile());
+        if (!table.getDateColumn().isEmpty()) {
+            query += " WHERE " + table.getDateColumn() + " = :date";
+        }
+        
+        return new JdbcPagingItemReaderBuilder<Map<String, Object>>()
+                .dataSource(dataSource)
+                .name("jdbcPagingReader-" + table.getName())
+                .queryProvider(createQueryProvider(query))
+                .parameterValues(table.getDateColumn().isEmpty() ? null : Map.of("date", "#{stepExecutionContext[date]}"))
+                .pageSize(tableConfig.getChunkSize())
+                .rowMapper(new ColumnMapRowMapper())
+                .build();
+    }
+
+    private SqlPagingQueryProvider createQueryProvider(String query) {
+        SqlPagingQueryProviderFactoryBean provider = new SqlPagingQueryProviderFactoryBean();
+        provider.setDataSource(dataSource);
+        provider.setSelectClause("SELECT *");
+        provider.setFromClause("(" + query + ") AS T");
+        provider.setSortKey("id"); // Replace with primary key
+
+        try {
+            return provider.getObject();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to set QueryProvider", e);
+        }
+    }
+
+    private FlatFileItemWriter<Map<String, Object>> itemWriter(TableConfig.Table table) {
+        return new FlatFileItemWriterBuilder<Map<String, Object>>()
+                .name("fileWriter-" + table.getName())
+                .resource(new FileSystemResource(tableConfig.getOutputDirectory() + "/" + table.getName() + ".txt"))
+                .lineAggregator(new DelimitedLineAggregator<Map<String, Object>>() {{
+                    setDelimiter("|");
+                    setFieldExtractor(item -> item.values().toArray(new String[0]));
+                }})
+                .build();
+    }
+
+    private String loadSqlFromFile(String sqlFile) {
+        try {
+            return Files.readString(Paths.get(sqlFile));
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read SQL file: " + sqlFile, e);
+        }
+    }
+
+    @Bean
+    public TaskExecutor taskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(tableConfig.getConcurrencyLimit());
+        executor.setMaxPoolSize(tableConfig.getConcurrencyLimit());
+        executor.setThreadNamePrefix("Batch-");
+        executor.initialize();
+        return executor;
+    }
+}
+Summary:
+Date-Agnostic Partitioner: The partitioner checks if a date column is configured; if not, it processes the table without partitioning on dates.
+Conditional Date Filtering in Reader: Each table’s SQL query is modified to include a date filter only if specified.
+Parallel Execution for Flexibility: The job remains parallel and adaptable to tables with and without date fields.
+This way, tables can be processed in parallel whether they use eventDate, fileUploadDate, or no date field at all. Let me know if you need any more details!
+
+
+
+
+
+
+You said:
+in the same solution how to control the page size per table. It should be externalized
+ChatGPT said:
+ChatGPT
+To control the page size for each table independently, you can add a pageSize field to the configuration for each table in application.yml. Then, modify the configuration classes and reader setup to use the specified page size.
+
+Step 1: Update Configuration in application.yml
+Add a pageSize field for each table to specify the desired chunk size.
+
+yaml
+Copy code
+spring:
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=your_database
+    username: your_username
+    password: your_password
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+
+app:
+  tables:
+    - name: "table1"
+      sqlFile: "sql/table1.sql"
+      dateColumn: "eventDate"
+      dateQuery: "SELECT DISTINCT eventDate FROM table1_events"
+      pageSize: 100
+    - name: "table2"
+      sqlFile: "sql/table2.sql"
+      dateColumn: "fileUploadDate"
+      dateQuery: "SELECT DISTINCT fileUploadDate FROM table2_uploads"
+      pageSize: 200
+    - name: "table3"
+      sqlFile: "sql/table3.sql"
+      dateColumn: ""  # No date filtering
+      pageSize: 150
+  outputDirectory: "/path/to/output"
+  concurrencyLimit: 4
+Step 2: Update the Table Configuration Model
+Add a pageSize field to the Table class in the configuration model.
+
+java
+Copy code
+@Data
+@ConfigurationProperties(prefix = "app")
+public class TableConfig {
+    private List<Table> tables;
+    private String outputDirectory;
+    private int concurrencyLimit;
+
+    @Data
+    public static class Table {
+        private String name;
+        private String sqlFile;
+        private String dateColumn;
+        private String dateQuery;
+        private int pageSize;  // Define page size for each table
+    }
+}
+Step 3: Modify the Item Reader to Use Table-Specific Page Size
+In the BatchConfig class, use the pageSize from the configuration for each table when building the JdbcPagingItemReader.
+
+java
+Copy code
+private JdbcPagingItemReader<Map<String, Object>> itemReader(TableConfig.Table table) {
+    String query = loadSqlFromFile(table.getSqlFile());
+    if (!table.getDateColumn().isEmpty()) {
+        query += " WHERE " + table.getDateColumn() + " = :date";
+    }
+
+    return new JdbcPagingItemReaderBuilder<Map<String, Object>>()
+            .dataSource(dataSource)
+            .name("jdbcPagingReader-" + table.getName())
+            .queryProvider(createQueryProvider(query))
+            .parameterValues(table.getDateColumn().isEmpty() ? null : Map.of("date", "#{stepExecutionContext[date]}"))
+            .pageSize(table.getPageSize())  // Use table-specific page size
+            .rowMapper(new ColumnMapRowMapper())
+            .build();
+}
+Explanation:
+Configuration-driven Page Size: Each table specifies its pageSize, which is then passed to the JdbcPagingItemReader using table.getPageSize().
+Flexibility: This setup ensures that each table can be processed with an optimal page size suited to its data volume and characteristics.
+This configuration provides full control over page size on a per-table basis, externalizing the setting for easy adjustment without modifying the code. Let me know if this matches your needs or if you need further adjustments!
+
+
+
+
+
+
+You said:
+I mean the count of record to bring in single sql call
+ChatGPT said:
+ChatGPT
+To control the number of records fetched in a single SQL call for each table, you can externalize the fetchSize in your configuration. This fetchSize determines how many rows are retrieved per database call in each chunk.
+
+Here’s how to implement this:
+
+Step 1: Update Configuration in application.yml
+Add a fetchSize parameter to specify the number of records to fetch per SQL call for each table.
+
+yaml
+Copy code
+spring:
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=your_database
+    username: your_username
+    password: your_password
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+
+app:
+  tables:
+    - name: "table1"
+      sqlFile: "sql/table1.sql"
+      dateColumn: "eventDate"
+      dateQuery: "SELECT DISTINCT eventDate FROM table1_events"
+      fetchSize: 500
+    - name: "table2"
+      sqlFile: "sql/table2.sql"
+      dateColumn: "fileUploadDate"
+      dateQuery: "SELECT DISTINCT fileUploadDate FROM table2_uploads"
+      fetchSize: 1000
+    - name: "table3"
+      sqlFile: "sql/table3.sql"
+      dateColumn: ""
+      fetchSize: 300
+  outputDirectory: "/path/to/output"
+  concurrencyLimit: 4
+Step 2: Update the Table Configuration Model
+Add a fetchSize field in the Table class.
+
+java
+Copy code
+@Data
+@ConfigurationProperties(prefix = "app")
+public class TableConfig {
+    private List<Table> tables;
+    private String outputDirectory;
+    private int concurrencyLimit;
+
+    @Data
+    public static class Table {
+        private String name;
+        private String sqlFile;
+        private String dateColumn;
+        private String dateQuery;
+        private int fetchSize;  // Number of records per SQL call
+    }
+}
+Step 3: Configure the JdbcPagingItemReader to Use fetchSize
+In the BatchConfig, set the fetchSize when defining the JdbcPagingItemReader.
+
+java
+Copy code
+private JdbcPagingItemReader<Map<String, Object>> itemReader(TableConfig.Table table) {
+    String query = loadSqlFromFile(table.getSqlFile());
+    if (!table.getDateColumn().isEmpty()) {
+        query += " WHERE " + table.getDateColumn() + " = :date";
+    }
+
+    JdbcPagingItemReader<Map<String, Object>> reader = new JdbcPagingItemReaderBuilder<Map<String, Object>>()
+            .dataSource(dataSource)
+            .name("jdbcPagingReader-" + table.getName())
+            .queryProvider(createQueryProvider(query))
+            .parameterValues(table.getDateColumn().isEmpty() ? null : Map.of("date", "#{stepExecutionContext[date]}"))
+            .pageSize(table.getPageSize())  // Set the chunk size
+            .rowMapper(new ColumnMapRowMapper())
+            .build();
+    
+    reader.setFetchSize(table.getFetchSize());  // Use the specified fetch size
+    return reader;
+}
+Explanation:
+Fetch Size: The fetchSize parameter tells the database how many rows to return in a single round-trip. Configuring it per table lets you manage memory and performance based on the table’s characteristics.
+Externalized Control: Using application.yml for fetch size allows you to tune database interactions without changing the code.
+This setup provides granular control over the number of records fetched per SQL call, which can be adjusted based on the table’s data size and performance considerations. Let me know if you need more customization!
