@@ -1,0 +1,7 @@
+I have multiple field which loads data in single table which has sourcesystemid and bussiness date column. Rest are 150 columns and data coming from files is mapped among 150 coloumns. Not necessary every feed has 150 columns. 
+
+I have another table in database which is rules tables. There are columns defined in table. Source Data, Source System, KeyField_1 till KeyField_10, KeyValueField_1 till KeyValueField_10, DataField_1 till DataField_10 and DataValueField_1 till DataValueField_10. Key field will have the column name from above table and KeyValueFiled would have some text. DataField will have column name from above table and DataValueField will have some text. There would be Refresh button on the screen which shows data from this table in UI. Not necessary User would fill all keys columns. There would be multiple entries added for single sourcedata and source system.
+
+Based on this data from rules table, we need to lookup the data in above feed table and execute the rules. Execution of rules mean those rows matching the KeyValueField defined in KeyValue, Column defined in DataField will be updated with text defined in DataValueField. What would be the strategy for rule execution since multiple rules can update the same row again and again.
+
+User want to execute the rules in order of they count of KeyField. Suppose one rule with two keyField populated will be execute first. Those with more number of field will be execute last. There could be rules at same level which mean two rules having same number of KeyFields defined.
